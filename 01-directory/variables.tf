@@ -43,5 +43,5 @@ variable "user_base_dn" {
 variable "vcn_name" {
   description = "Display name for the VCN."
   type        = string
-  default     = "xubuntu-vcn"
+  default     = "mini-ad-vcn"
 }

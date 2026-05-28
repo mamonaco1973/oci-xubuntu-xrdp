@@ -6,9 +6,9 @@
   },
   "groups": [
     { "name": "${lower(NETBIOS)}-users", "gidNumber": 10001 },
-    { "name": "us",                      "gidNumber": 10002 },
-    { "name": "india",                   "gidNumber": 10003 },
-    { "name": "linux-admins",            "gidNumber": 10004 }
+    { "name": "us",           "gidNumber": 10002 },
+    { "name": "india",        "gidNumber": 10003 },
+    { "name": "linux-admins", "gidNumber": 10004 }
   ],
   "users": [
     {

@@ -15,7 +15,7 @@ resource "oci_bastion_bastion" "ad_bastion" {
   compartment_id   = var.compartment_ocid
   # Targets the private subnet where the DC lives
   target_subnet_id = oci_core_subnet.ad_subnet.id
-  name             = "xubuntu-bastion"
+  name             = "mini-ad-bastion"
 
   # Restrict to your IP in production
   client_cidr_block_allow_list = ["0.0.0.0/0"]

@@ -23,7 +23,7 @@ resource "local_file" "public_key" {
 # ==============================================================================
 # AD Account Passwords
 # Passwords are generated here and passed to the DC via the module's user_data.
-# They are also output (sensitive) so 03-servers can read them via remote state.
+# They are also output (sensitive) so 02-servers can read them via remote state.
 # ==============================================================================
 
 resource "random_password" "admin_password" {

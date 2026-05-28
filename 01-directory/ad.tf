@@ -58,16 +58,16 @@ locals {
 }
 
 # ==============================================================================
-# Outputs consumed by 03-servers via terraform_remote_state
+# Outputs consumed by 02-servers via terraform_remote_state
 # ==============================================================================
 
 output "compartment_ocid" {
-  description = "Compartment OCID for 03-servers to provision into."
+  description = "Compartment OCID for 02-servers to provision into."
   value       = var.compartment_ocid
 }
 
 output "vcn_id" {
-  description = "VCN OCID for NSG and subnet lookups in 03-servers."
+  description = "VCN OCID for NSG and subnet lookups in 02-servers."
   value       = oci_core_vcn.ad_vcn.id
 }
 
@@ -77,7 +77,7 @@ output "vm_subnet_ocid" {
 }
 
 output "admin_password" {
-  description = "AD admin password for domain join in 03-servers userdata."
+  description = "AD admin password for domain join in 02-servers userdata."
   value       = local.admin_password
   sensitive   = true
 }

@@ -27,15 +27,3 @@ variable "user_base_dn" {
   default     = "CN=Users,DC=mcloud,DC=mikecloud,DC=com"
 }
 
-# ==============================================================================
-# Packer Image
-# ------------------------------------------------------------------------------
-# OCID of the custom Xubuntu image built by 02-packer.
-# Resolved by apply.sh via OCI CLI after the Packer build completes, then
-# exported as TF_VAR_xubuntu_image_ocid before terraform apply.
-# ==============================================================================
-
-variable "xubuntu_image_ocid" {
-  description = "OCID of the Packer-built Xubuntu custom image."
-  type        = string
-}

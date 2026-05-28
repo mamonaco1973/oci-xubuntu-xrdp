@@ -97,7 +97,7 @@ try {
     Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex `
         -ConnectionSpecificSuffix "${domain_fqdn}"
 
-    # Map Z: to the Xubuntu Samba gateway's [nfs] share at every logon.
+    # Map Z: to the Linux Samba gateway's [shared] share at every logon.
     # Placed in the All Users startup folder so domain users get the mapping
     # automatically after the domain join reboot.
     Write-Output "Creating persistent Z: drive mapping to \\${samba_server}\nfs"

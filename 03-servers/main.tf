@@ -4,7 +4,7 @@
 # Purpose:
 #   - Configures the OCI provider.
 #   - Reads outputs from 01-directory via terraform_remote_state.
-#   - Resolves the Windows Server 2022 image for the admin instance.
+#   - Resolves Ubuntu and Windows images for compute instance provisioning.
 # ==============================================================================
 
 terraform {
@@ -43,15 +43,15 @@ data "terraform_remote_state" "directory" {
 }
 
 locals {
-  compartment_ocid             = data.terraform_remote_state.directory.outputs.compartment_ocid
-  vcn_id                       = data.terraform_remote_state.directory.outputs.vcn_id
-  vm_subnet_ocid               = data.terraform_remote_state.directory.outputs.vm_subnet_ocid
+  compartment_ocid = data.terraform_remote_state.directory.outputs.compartment_ocid
+  vcn_id           = data.terraform_remote_state.directory.outputs.vcn_id
+  vm_subnet_ocid   = data.terraform_remote_state.directory.outputs.vm_subnet_ocid
   admin_password               = data.terraform_remote_state.directory.outputs.admin_password
   ssh_public_key               = data.terraform_remote_state.directory.outputs.ssh_public_key
   dc_private_ip                = data.terraform_remote_state.directory.outputs.dc_private_ip
   windows_local_admin_password = data.terraform_remote_state.directory.outputs.windows_local_admin_password
-  xubuntu_hostname             = "xubuntu-${random_id.server_suffix.hex}"
-  windows_hostname             = "win-${random_id.server_suffix.hex}"
+  linux_hostname   = "linux-${random_id.server_suffix.hex}"
+  windows_hostname = "win-${random_id.server_suffix.hex}"
 }
 
 # ==============================================================================
@@ -60,6 +60,19 @@ locals {
 
 data "oci_identity_availability_domains" "ads" {
   compartment_id = local.compartment_ocid
+}
+
+# ==============================================================================
+# Ubuntu 24.04 Image
+# ==============================================================================
+
+data "oci_core_images" "ubuntu" {
+  compartment_id           = local.compartment_ocid
+  operating_system         = "Canonical Ubuntu"
+  operating_system_version = "24.04"
+  shape                    = "VM.Standard.E4.Flex"
+  sort_by                  = "TIMECREATED"
+  sort_order               = "DESC"
 }
 
 # ==============================================================================

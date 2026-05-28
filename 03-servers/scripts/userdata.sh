@@ -50,6 +50,38 @@ until curl -fsS --max-time 10 https://us.archive.ubuntu.com/ >/dev/null 2>&1; do
 done
 echo "Network ready: $(date -Is)"
 
+# Rewrite apt sources — avoids ubuntu.com DDoS issues on OCI
+sed -i 's|http://archive.ubuntu.com|http://us.archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+sed -i 's|http://security.ubuntu.com|http://us.archive.ubuntu.com|g' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+
+export DEBIAN_FRONTEND=noninteractive
+# OCI NAT gateway does not route IPv6 — force IPv4 for all apt traffic
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
+echo "iptables-persistent iptables-persistent/autosave_v6 boolean false" | debconf-set-selections
+# APT::Update::Error-Mode=any makes apt-get update exit non-zero when any
+# source fails — without it, W: warnings still exit 0 and fool the retry loop.
+for i in {1..20}; do
+  apt-get update -y -o APT::Update::Error-Mode=any && break
+  echo "apt-get update failed (attempt $i/20), killing apt and retrying in 30s..."
+  pkill -9 -f apt 2>/dev/null || true
+  sleep 30
+done
+apt-get install -y \
+  less curl jq python3-venv \
+  realmd sssd-ad sssd-tools libnss-sss libpam-sss \
+  adcli samba samba-common-bin samba-libs \
+  winbind libpam-winbind libnss-winbind \
+  oddjob oddjob-mkhomedir packagekit krb5-user \
+  nfs-common \
+  nano vim iptables-persistent
+
+# Install OCI CLI into a venv — avoids conflict with Debian-managed urllib3
+# which has no RECORD file and blocks pip's dependency resolution.
+python3 -m venv /opt/oci-venv
+/opt/oci-venv/bin/pip install --quiet oci-cli
+ln -sf /opt/oci-venv/bin/oci /usr/local/bin/oci
+
 # ==============================================================================
 # FSS NFS Mounts
 # ------------------------------------------------------------------------------
@@ -65,7 +97,7 @@ echo "$MT_IP:/nfs  /nfs  nfs  _netdev,nfsvers=3  0  0" >> /etc/fstab
 mkdir -p /nfs/data /nfs/home
 
 # Symlink /home -> /nfs/home so AD user homes live on FSS without a
-# separate export or fstab entry.
+# separate export or fstab entry — same pattern as azure-rstudio-cluster.
 mv /home /home.local
 ln -s /nfs/home /home
 cp -a /home.local/. /nfs/home/
@@ -121,6 +153,7 @@ if [ -f /etc/sssd/sssd.conf ]; then
   chmod 600 /etc/sssd/sssd.conf || true
 fi
 
+# Avoid XAuthority warning for new users
 touch /etc/skel/.Xauthority
 chmod 600 /etc/skel/.Xauthority
 
@@ -140,7 +173,7 @@ fi
 # ------------------------------------------------------------------------------
 # Samba uses the machine keytab written by realm join (adcli) at
 # /etc/krb5.keytab — no separate "net ads join" needed.
-# Windows clients map Z: to \\<this-ip>\nfs via the [nfs] share.
+# Windows clients map Z: to \\<this-ip>\efs via the [efs] share.
 # ==============================================================================
 
 systemctl stop sssd || true
@@ -248,9 +281,9 @@ echo "DEBUG: /nfs ownership:"
 ls -la /nfs || true
 
 cd /nfs
-git clone https://github.com/mamonaco1973/oci-xubuntu-xrdp.git
-chmod -R 775 oci-xubuntu-xrdp
-chgrp -R "${lower(netbios)}-users" oci-xubuntu-xrdp
+git clone https://github.com/mamonaco1973/oci-fss.git
+chmod -R 775 oci-fss
+chgrp -R "${lower(netbios)}-users" oci-fss
 
 netfilter-persistent save
 

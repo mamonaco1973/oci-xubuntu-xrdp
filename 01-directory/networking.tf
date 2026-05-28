@@ -1,20 +1,20 @@
 # ==============================================================================
-# Network Baseline: Xubuntu VCN
+# Network Baseline: mini-AD VCN
 # ------------------------------------------------------------------------------
 # Purpose:
-#   - Builds the VCN for the xubuntu-xrdp deployment.
+#   - Builds the VCN for the mini-AD quick start.
 #
 # Scope:
 #   - One VCN with:
-#       - One public "vm" subnet for client workloads (Xubuntu + Windows).
+#       - Two public "vm" subnets for client workloads.
 #       - One private "ad" subnet for the Samba 4 domain controller.
 #   - Internet egress:
-#       - Public subnet routes to an Internet Gateway.
+#       - Public subnets route to an Internet Gateway.
 #       - Private subnet routes to a NAT Gateway for outbound-only access.
 #
 # Notes:
 #   - OCI security lists attach at the subnet level (unlike AWS SGs per instance).
-#   - NSGs on client instances handle granular port control (see 03-servers).
+#   - NSGs on the DC instance handle AD-specific port control (see module).
 # ==============================================================================
 
 # ==============================================================================
@@ -26,7 +26,7 @@ resource "oci_core_vcn" "ad_vcn" {
   cidr_block     = "10.0.0.0/24"
   display_name   = var.vcn_name
   # dns_label must be alphanumeric <= 15 chars
-  dns_label      = "xubuntuvcn"
+  dns_label      = "miniadvcn"
 }
 
 # ==============================================================================
@@ -81,8 +81,9 @@ resource "oci_core_route_table" "private_rt" {
 # ==============================================================================
 # Security Lists
 # ------------------------------------------------------------------------------
-# Public VM subnet: SSH (22), RDP (3389 — XRDP desktop + Windows),
-#   NFS (111/2048-2050), SMB (445).
+# Public VM subnet: SSH (22), RDP (3389), NFS (111/2048-2050), SMB (445).
+#   NFS rules allow the Linux instance to reach the FSS mount target
+#   (both in vm-subnet). SMB allows Windows to reach the Samba gateway.
 # Private AD subnet: Open ingress within VCN CIDR so clients can reach AD ports.
 #   The module NSG handles granular port control on the DC instance itself.
 # ==============================================================================
@@ -156,7 +157,7 @@ resource "oci_core_security_list" "vm_sl" {
     }
   }
 
-  # SMB — Windows client connects to the Xubuntu Samba gateway on 445
+  # SMB — Windows clients connect to the Linux Samba gateway on 445
   ingress_security_rules {
     protocol  = "6"
     source    = "10.0.0.64/26"
@@ -197,7 +198,7 @@ resource "oci_core_security_list" "ad_sl" {
 # Subnets
 # ------------------------------------------------------------------------------
 # Public Subnet:
-#   - vm-subnet: Client workloads with public IP (Xubuntu + Windows instances).
+#   - vm-subnet: Client workloads with public IP (Linux + Windows instances).
 #
 # Private Subnet:
 #   - ad-subnet: Domain controller with NAT egress only.
