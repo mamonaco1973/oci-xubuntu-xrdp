@@ -50,7 +50,7 @@ locals {
   ssh_public_key               = data.terraform_remote_state.directory.outputs.ssh_public_key
   dc_private_ip                = data.terraform_remote_state.directory.outputs.dc_private_ip
   windows_local_admin_password = data.terraform_remote_state.directory.outputs.windows_local_admin_password
-  linux_hostname   = "linux-${random_id.server_suffix.hex}"
+  xubuntu_hostname = "xubuntu-${random_id.server_suffix.hex}"
   windows_hostname = "win-${random_id.server_suffix.hex}"
 }
 
@@ -60,19 +60,6 @@ locals {
 
 data "oci_identity_availability_domains" "ads" {
   compartment_id = local.compartment_ocid
-}
-
-# ==============================================================================
-# Ubuntu 24.04 Image
-# ==============================================================================
-
-data "oci_core_images" "ubuntu" {
-  compartment_id           = local.compartment_ocid
-  operating_system         = "Canonical Ubuntu"
-  operating_system_version = "24.04"
-  shape                    = "VM.Standard.E4.Flex"
-  sort_by                  = "TIMECREATED"
-  sort_order               = "DESC"
 }
 
 # ==============================================================================

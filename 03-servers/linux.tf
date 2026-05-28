@@ -7,20 +7,20 @@
 #   - Launched into the public subnet with a public IP for SSH access.
 # ==============================================================================
 
-resource "oci_core_instance" "linux_ad_instance" {
+resource "oci_core_instance" "xubuntu_instance" {
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
   compartment_id      = local.compartment_ocid
   shape               = "VM.Standard.E4.Flex"
-  display_name        = local.linux_hostname
+  display_name        = local.xubuntu_hostname
 
   shape_config {
-    ocpus         = 1
-    memory_in_gbs = 4
+    ocpus         = 4
+    memory_in_gbs = 16
   }
 
   source_details {
     source_type = "image"
-    source_id   = data.oci_core_images.ubuntu.images[0].id
+    source_id   = var.xubuntu_image_ocid
   }
 
   create_vnic_details {
@@ -47,3 +47,4 @@ resource "oci_core_instance" "linux_ad_instance" {
   # FSS mount target must exist before instance boots and runs userdata
   depends_on = [oci_file_storage_export.nfs_export]
 }
+

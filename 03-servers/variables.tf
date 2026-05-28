@@ -27,3 +27,13 @@ variable "user_base_dn" {
   default     = "CN=Users,DC=mcloud,DC=mikecloud,DC=com"
 }
 
+# ==============================================================================
+# Packer Image
+# OCID of the Xubuntu custom image built by 02-packer.
+# ==============================================================================
+
+variable "xubuntu_image_ocid" {
+  description = "OCID of the Packer-built Xubuntu desktop image."
+  type        = string
+}
+

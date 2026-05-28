@@ -1,11 +1,11 @@
-output "linux_public_ip" {
-  description = "Public IP of the Linux AD client instance."
-  value       = oci_core_instance.linux_ad_instance.public_ip
+output "xubuntu_public_ip" {
+  description = "Public IP of the Xubuntu desktop instance."
+  value       = oci_core_instance.xubuntu_instance.public_ip
 }
 
-output "linux_private_ip" {
-  description = "Private IP of the Linux instance (Samba gateway for Z: drive)."
-  value       = oci_core_instance.linux_ad_instance.private_ip
+output "xubuntu_private_ip" {
+  description = "Private IP of the Xubuntu instance (Samba gateway for Z: drive)."
+  value       = oci_core_instance.xubuntu_instance.private_ip
 }
 
 output "mount_target_ip" {
