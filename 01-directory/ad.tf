@@ -1,61 +1,134 @@
-# ================================================================================
-# SECTION: Mini Active Directory (mini-ad) Module Invocation
-# ================================================================================
-#
+# ==============================================================================
+# Mini Active Directory (mini-ad) - Module Invocation
+# ------------------------------------------------------------------------------
 # Purpose:
-#   Invoke the reusable "mini-ad" module to provision an Ubuntu-based
-#   AD Domain Controller. Provide networking, DNS, and authentication
-#   inputs and supply user account definitions via a rendered JSON blob.
+#   - Invokes the reusable OCI mini-ad module to deploy a Samba 4 AD DC.
 #
 # Notes:
-#   - users_json is rendered from a local template file and passed into
-#     the module for bootstrap-time user creation.
-#   - depends_on ensures NAT and private routing exist before the AD VM
-#     begins provisioning (package repos, updates, etc.).
-#
-# ================================================================================
+#   - Ensure NAT gateway and route table associations exist before provisioning
+#     (depends_on) — the DC bootstrap needs outbound internet for apt packages.
+# ==============================================================================
 
 module "mini_ad" {
-  source            = "github.com/mamonaco1973/module-aws-mini-ad"
-  netbios           = var.netbios
-  vpc_id            = aws_vpc.ad-vpc.id
-  realm             = var.realm
-  users_json        = local.users_json
-  user_base_dn      = var.user_base_dn
-  ad_admin_password = random_password.admin_password.result
-  dns_zone          = var.dns_zone
-  subnet_id         = aws_subnet.ad-subnet.id
+  source = "github.com/mamonaco1973/module-oci-mini-ad"
+
+  compartment_id = var.compartment_ocid
+  tenancy_ocid   = var.tenancy_ocid
+
+  # Domain identity
+  netbios      = var.netbios
+  realm        = var.realm
+  dns_zone     = var.dns_zone
+  user_base_dn = var.user_base_dn
+  users_json   = local.users_json
+
+  # Authentication
+  ad_admin_password = local.admin_password
+
+  # Networking — DC placed in private subnet; module updates VCN default DHCP
+  vcn_id                      = oci_core_vcn.ad_vcn.id
+  vcn_default_dhcp_options_id = oci_core_vcn.ad_vcn.default_dhcp_options_id
+  subnet_ocid                 = oci_core_subnet.ad_subnet.id
+
+  # SSH key for management access
+  ssh_public_key = tls_private_key.ssh.public_key_openssh
 
   depends_on = [
-    aws_nat_gateway.ad_nat,
-    aws_route_table_association.rt_assoc_ad_private
+    oci_core_nat_gateway.ad_nat,
+    oci_core_route_table.private_rt,
   ]
 }
 
-# ================================================================================
-# SECTION: Render users_json Template Payload
-# ================================================================================
-#
-# Purpose:
-#   Render ./scripts/users.json.template into a single JSON string used
-#   by the mini-ad bootstrap process to create demo/test user accounts.
-#
-# Design:
-#   - Template variables are replaced at apply time using templatefile().
-#   - User passwords are injected from local.passwords (generated earlier).
-#   - The rendered blob is passed to the module as local.users_json.
-#
-# ================================================================================
+# ==============================================================================
+# Seed user JSON — injected into the DC bootstrap to create demo accounts
+# ==============================================================================
 
 locals {
   users_json = templatefile("./scripts/users.json.template", {
-    USER_BASE_DN   = var.user_base_dn
-    DNS_ZONE       = var.dns_zone
-    REALM          = var.realm
-    NETBIOS        = var.netbios
-    jsmith_password = local.passwords["jsmith"]
-    edavis_password = local.passwords["edavis"]
-    rpatel_password = local.passwords["rpatel"]
-    akumar_password = local.passwords["akumar"]
+    USER_BASE_DN = var.user_base_dn
+    DNS_ZONE     = var.dns_zone
+    REALM        = var.realm
+    NETBIOS      = var.netbios
+
+    jsmith_password = local.jsmith_password
+    edavis_password = local.edavis_password
+    rpatel_password = local.rpatel_password
+    akumar_password = local.akumar_password
   })
+}
+
+# ==============================================================================
+# Outputs consumed by 03-servers via terraform_remote_state
+# ==============================================================================
+
+output "compartment_ocid" {
+  description = "Compartment OCID for 03-servers to provision into."
+  value       = var.compartment_ocid
+}
+
+output "vcn_id" {
+  description = "VCN OCID for NSG and subnet lookups in 03-servers."
+  value       = oci_core_vcn.ad_vcn.id
+}
+
+output "vm_subnet_ocid" {
+  description = "OCID of vm-subnet for client instance placement."
+  value       = oci_core_subnet.vm_subnet.id
+}
+
+output "admin_password" {
+  description = "AD admin password for domain join in 03-servers userdata."
+  value       = local.admin_password
+  sensitive   = true
+}
+
+output "jsmith_password" {
+  value     = local.jsmith_password
+  sensitive = true
+}
+
+output "edavis_password" {
+  value     = local.edavis_password
+  sensitive = true
+}
+
+output "rpatel_password" {
+  value     = local.rpatel_password
+  sensitive = true
+}
+
+output "akumar_password" {
+  value     = local.akumar_password
+  sensitive = true
+}
+
+output "ssh_public_key" {
+  description = "SSH public key for authorizing on client instances."
+  value       = tls_private_key.ssh.public_key_openssh
+}
+
+output "dc_private_ip" {
+  description = "Private IP of the AD DC — used as the bastion session target."
+  value       = module.mini_ad.dns_server
+}
+
+output "bastion_id" {
+  description = "OCID of the OCI Bastion for creating SSH sessions."
+  value       = oci_bastion_bastion.ad_bastion.id
+}
+
+output "dns_zone" {
+  description = "AD DNS zone — used by get_password.sh to display fully-qualified usernames."
+  value       = var.dns_zone
+}
+
+output "netbios" {
+  description = "NetBIOS domain name — used by validate.sh for RDP connection hints."
+  value       = var.netbios
+}
+
+output "windows_local_admin_password" {
+  description = "Local admin password for the Windows instance — RDP fallback."
+  value       = local.windows_local_admin_password
+  sensitive   = true
 }

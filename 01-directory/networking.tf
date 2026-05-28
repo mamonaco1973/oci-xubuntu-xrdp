@@ -1,174 +1,226 @@
-# ================================================================================
-# FILE: networking.tf
-# ================================================================================
-#
+# ==============================================================================
+# Network Baseline: Xubuntu VCN
+# ------------------------------------------------------------------------------
 # Purpose:
-#   Establish a minimal network baseline for the mini-AD lab.
+#   - Builds the VCN for the xubuntu-xrdp deployment.
 #
-# Design:
-#   - One VPC with:
-#       * Public "vm" subnet for bastion/utility hosts and NAT placement
-#       * Private "ad" subnet for domain controller / AD services
-#   - Public subnet egress via Internet Gateway (IGW)
-#   - Private subnet egress via NAT Gateway (no inbound internet exposure)
+# Scope:
+#   - One VCN with:
+#       - One public "vm" subnet for client workloads (Xubuntu + Windows).
+#       - One private "ad" subnet for the Samba 4 domain controller.
+#   - Internet egress:
+#       - Public subnet routes to an Internet Gateway.
+#       - Private subnet routes to a NAT Gateway for outbound-only access.
 #
 # Notes:
-#   - CIDRs and AZ IDs are examples. Align to your region and IP plan.
-#   - NAT Gateway is required if private subnet instances need package
-#     repos / OS updates / external dependencies during bootstrap.
+#   - OCI security lists attach at the subnet level (unlike AWS SGs per instance).
+#   - NSGs on client instances handle granular port control (see 03-servers).
+# ==============================================================================
+
+# ==============================================================================
+# VCN
+# ==============================================================================
+
+resource "oci_core_vcn" "ad_vcn" {
+  compartment_id = var.compartment_ocid
+  cidr_block     = "10.0.0.0/24"
+  display_name   = var.vcn_name
+  # dns_label must be alphanumeric <= 15 chars
+  dns_label      = "xubuntuvcn"
+}
+
+# ==============================================================================
+# Internet Gateway
+# ==============================================================================
+
+resource "oci_core_internet_gateway" "ad_igw" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "ad-igw"
+  enabled        = true
+}
+
+# ==============================================================================
+# NAT Gateway – outbound-only internet access for the private AD subnet
+# ==============================================================================
+
+resource "oci_core_nat_gateway" "ad_nat" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "ad-nat"
+}
+
+# ==============================================================================
+# Route Tables
+# ==============================================================================
+
+resource "oci_core_route_table" "public_rt" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "public-route-table"
+
+  route_rules {
+    destination       = "0.0.0.0/0"
+    destination_type  = "CIDR_BLOCK"
+    network_entity_id = oci_core_internet_gateway.ad_igw.id
+  }
+}
+
+resource "oci_core_route_table" "private_rt" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "private-route-table"
+
+  route_rules {
+    destination       = "0.0.0.0/0"
+    destination_type  = "CIDR_BLOCK"
+    network_entity_id = oci_core_nat_gateway.ad_nat.id
+  }
+}
+
+# ==============================================================================
+# Security Lists
+# ------------------------------------------------------------------------------
+# Public VM subnet: SSH (22), RDP (3389 — XRDP desktop + Windows),
+#   NFS (111/2048-2050), SMB (445).
+# Private AD subnet: Open ingress within VCN CIDR so clients can reach AD ports.
+#   The module NSG handles granular port control on the DC instance itself.
+# ==============================================================================
+
+resource "oci_core_security_list" "vm_sl" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "vm-security-list"
+
+  ingress_security_rules {
+    protocol  = "6"
+    source    = "0.0.0.0/0"
+    stateless = false
+    tcp_options {
+      min = 22
+      max = 22
+    }
+  }
+
+  ingress_security_rules {
+    protocol  = "6"
+    source    = "0.0.0.0/0"
+    stateless = false
+    tcp_options {
+      min = 3389
+      max = 3389
+    }
+  }
+
+  # NFS portmapper (TCP) — required by FSS mount target
+  ingress_security_rules {
+    protocol  = "6"
+    source    = "10.0.0.64/26"
+    stateless = false
+    tcp_options {
+      min = 111
+      max = 111
+    }
+  }
+
+  # NFS portmapper (UDP) — required by FSS mount target
+  ingress_security_rules {
+    protocol  = "17"
+    source    = "10.0.0.64/26"
+    stateless = false
+    udp_options {
+      min = 111
+      max = 111
+    }
+  }
+
+  # NFS lockd/mountd/statd (TCP) — FSS uses ports 2048-2050
+  ingress_security_rules {
+    protocol  = "6"
+    source    = "10.0.0.64/26"
+    stateless = false
+    tcp_options {
+      min = 2048
+      max = 2050
+    }
+  }
+
+  # NFS (UDP) — FSS port 2048
+  ingress_security_rules {
+    protocol  = "17"
+    source    = "10.0.0.64/26"
+    stateless = false
+    udp_options {
+      min = 2048
+      max = 2048
+    }
+  }
+
+  # SMB — Windows client connects to the Xubuntu Samba gateway on 445
+  ingress_security_rules {
+    protocol  = "6"
+    source    = "10.0.0.64/26"
+    stateless = false
+    tcp_options {
+      min = 445
+      max = 445
+    }
+  }
+
+  egress_security_rules {
+    protocol    = "all"
+    destination = "0.0.0.0/0"
+    stateless   = false
+  }
+}
+
+resource "oci_core_security_list" "ad_sl" {
+  compartment_id = var.compartment_ocid
+  vcn_id         = oci_core_vcn.ad_vcn.id
+  display_name   = "ad-security-list"
+
+  # Allow all ingress from within the VCN — AD ports are further controlled by NSG
+  ingress_security_rules {
+    protocol  = "all"
+    source    = "10.0.0.0/24"
+    stateless = false
+  }
+
+  egress_security_rules {
+    protocol    = "all"
+    destination = "0.0.0.0/0"
+    stateless   = false
+  }
+}
+
+# ==============================================================================
+# Subnets
+# ------------------------------------------------------------------------------
+# Public Subnet:
+#   - vm-subnet: Client workloads with public IP (Xubuntu + Windows instances).
 #
-# ================================================================================
+# Private Subnet:
+#   - ad-subnet: Domain controller with NAT egress only.
+# ==============================================================================
 
-
-# ================================================================================
-# SECTION: VPC
-# ================================================================================
-
-# Create VPC for the lab environment.
-resource "aws_vpc" "ad-vpc" {
-  cidr_block           = "10.0.0.0/24" # /24 for this lab environment
-  enable_dns_support   = true          # Required for VPC DNS resolution
-  enable_dns_hostnames = true          # Enable EC2 DNS hostnames
-
-  tags = {
-    Name = var.vpc_name
-  }
+resource "oci_core_subnet" "vm_subnet" {
+  compartment_id    = var.compartment_ocid
+  vcn_id            = oci_core_vcn.ad_vcn.id
+  cidr_block        = "10.0.0.64/26"
+  display_name      = "vm-subnet"
+  dns_label         = "vmsubnet"
+  route_table_id    = oci_core_route_table.public_rt.id
+  security_list_ids = [oci_core_security_list.vm_sl.id]
 }
 
-
-# ================================================================================
-# SECTION: Internet Gateway
-# ================================================================================
-
-# Provide internet egress for resources in public subnets.
-resource "aws_internet_gateway" "ad-igw" {
-  vpc_id = aws_vpc.ad-vpc.id
-
-  tags = {
-    Name = "ad-igw"
-  }
-}
-
-
-# ================================================================================
-# SECTION: Subnets
-# ================================================================================
-
-# Public subnet for bastion/utility hosts and NAT Gateway placement.
-resource "aws_subnet" "vm-subnet-1" {
-  vpc_id                  = aws_vpc.ad-vpc.id
-  cidr_block              = "10.0.0.64/26" # ~62 usable IPs
-  map_public_ip_on_launch = true           # Auto-assign public IPv4
-  availability_zone_id    = "use1-az6"     # Example AZ (region-specific)
-
-  tags = {
-    Name = "vm-subnet-1"
-  }
-}
-
-# Optional second public subnet (uncomment if you want multi-AZ public).
-# resource "aws_subnet" "vm-subnet-2" {
-#   vpc_id                  = aws_vpc.ad-vpc.id
-#   cidr_block              = "10.0.0.128/26" # ~62 usable IPs
-#   map_public_ip_on_launch = true            # Auto-assign public IPv4
-#   availability_zone_id    = "use1-az4"      # Example AZ (region-specific)
-#
-#   tags = {
-#     Name = "vm-subnet-2"
-#   }
-# }
-
-# Private subnet for AD/DC services (no public IP assignment).
-resource "aws_subnet" "ad-subnet" {
-  vpc_id                  = aws_vpc.ad-vpc.id
-  cidr_block              = "10.0.0.0/26" # ~62 usable IPs
-  map_public_ip_on_launch = false         # Private-only
-  availability_zone_id    = "use1-az4"    # Example AZ (region-specific)
-
-  tags = {
-    Name = "ad-subnet"
-  }
-}
-
-
-# ================================================================================
-# SECTION: NAT Gateway
-# ================================================================================
-
-# Allocate an Elastic IP for NAT Gateway to provide consistent egress IP.
-resource "aws_eip" "nat_eip" {
-  tags = {
-    Name = "nat-eip"
-  }
-}
-
-# NAT Gateway must be placed in a public subnet.
-# It provides outbound internet for instances in private subnets.
-resource "aws_nat_gateway" "ad_nat" {
-  subnet_id     = aws_subnet.vm-subnet-1.id # Public subnet placement
-  allocation_id = aws_eip.nat_eip.id        # Attach EIP for static egress
-
-  tags = {
-    Name = "ad-nat"
-  }
-}
-
-
-# ================================================================================
-# SECTION: Route Tables
-# ================================================================================
-
-# Public route table: default route to IGW for direct internet access.
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.ad-vpc.id
-
-  tags = {
-    Name = "public-route-table"
-  }
-}
-
-# Public default route to the Internet Gateway.
-resource "aws_route" "public_default" {
-  route_table_id         = aws_route_table.public.id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.ad-igw.id
-}
-
-# Private route table: default route to NAT for outbound-only access.
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.ad-vpc.id
-
-  tags = {
-    Name = "private-route-table"
-  }
-}
-
-# Private default route to NAT Gateway (egress without inbound exposure).
-resource "aws_route" "private_default" {
-  route_table_id         = aws_route_table.private.id
-  destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.ad_nat.id
-}
-
-
-# ================================================================================
-# SECTION: Route Table Associations
-# ================================================================================
-
-# Associate public subnet with public route table.
-resource "aws_route_table_association" "rt_assoc_vm_public" {
-  subnet_id      = aws_subnet.vm-subnet-1.id
-  route_table_id = aws_route_table.public.id
-}
-
-# Optional association for second public subnet.
-# resource "aws_route_table_association" "rt_assoc_vm_public_2" {
-#   subnet_id      = aws_subnet.vm-subnet-2.id
-#   route_table_id = aws_route_table.public.id
-# }
-
-# Associate private AD subnet with private route table.
-resource "aws_route_table_association" "rt_assoc_ad_private" {
-  subnet_id      = aws_subnet.ad-subnet.id
-  route_table_id = aws_route_table.private.id
+resource "oci_core_subnet" "ad_subnet" {
+  compartment_id    = var.compartment_ocid
+  vcn_id            = oci_core_vcn.ad_vcn.id
+  cidr_block        = "10.0.0.0/26"
+  display_name      = "ad-subnet"
+  dns_label         = "adsubnet"
+  # Prevent public IP assignment on DC VNIC
+  prohibit_public_ip_on_vnic = true
+  route_table_id    = oci_core_route_table.private_rt.id
+  security_list_ids = [oci_core_security_list.ad_sl.id]
 }

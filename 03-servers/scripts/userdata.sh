@@ -1,82 +1,159 @@
 #!/bin/bash
 set -euo pipefail
 
-rm -f -r /root/userdata.log
-LOG="/root/userdata.log"
-mkdir -p "$(dirname "$LOG")"
+LOG=/root/userdata.log
+mkdir -p /root
 touch "$LOG"
 chmod 600 "$LOG"
+exec > >(tee -a "$LOG" | logger -t user-data -s 2>/dev/console) 2>&1
+trap 'echo "ERROR at line $LINENO"; exit 1' ERR
 
-exec > >(tee -a "$LOG") 2>&1
-
-echo "================================================================================"
 echo "user-data start: $(date -Is)"
-echo "================================================================================"
 
-trap 'rc=$?; echo "ERROR: exit=$rc line=$LINENO cmd=$BASH_COMMAND time=$(date -Is)"; exit $rc' ERR
+# Disable IPv6 — OCI subnets are IPv4-only; leaving IPv6 enabled causes glibc
+# to prefer AAAA records and waste time on unroutable connection attempts.
+sysctl -w net.ipv6.conf.all.disable_ipv6=1
+sysctl -w net.ipv6.conf.default.disable_ipv6=1
 
-# Active Directory + EFS bootstrap for Ubuntu.
-# - Installs and starts SSM agent.
-# - Mounts EFS (/efs and /home).
-# - Joins Active Directory (realm join using Samba).
-# - Updates SSH/SSSD defaults for AD users.
-# - Configures Samba + Winbind.
-# - Applies sudo and permissions, then clones helper repos.
+# Disable automatic updates and kill any already-running apt processes —
+# OCI fires cloud-init fast enough that apt-daily may have grabbed the lock
+# before this script runs; disable alone does not kill an in-flight process.
+systemctl disable --now apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
+pkill -9 -f unattended-upgrades 2>/dev/null || true
+pkill -9 -f apt 2>/dev/null || true
+sleep 2
 
-# Section 1: Update OS and install required packages.
-apt-get update -y
-export DEBIAN_FRONTEND=noninteractive
+# OCI Ubuntu images block all inbound ports via iptables by default.
+# TODO: restrict source CIDR and open only required ports for production.
+iptables -I INPUT -s 0.0.0.0/0 -j ACCEPT
 
-# Section 2: Mount Amazon EFS file system.
-mkdir -p /efs
-echo "${efs_mnt_server}:/ /efs   efs   _netdev,tls  0 0" >> /etc/fstab
+# Credentials and config injected by Terraform via templatefile
+ADMIN_USERNAME="Admin"
+ADMIN_PASSWORD="${admin_password}"
+DOMAIN_FQDN="${domain_fqdn}"
+MT_IP="${mt_ip}"
+
+# Set ubuntu password to match admin — allows password SSH as fallback
+echo "ubuntu:$ADMIN_PASSWORD" | chpasswd
+
+echo "Waiting for DNS resolution..."
+until nslookup us.archive.ubuntu.com >/dev/null 2>&1; do
+  echo "DNS not ready yet, retrying in 30s..."
+  sleep 30
+done
+echo "DNS ready: $(date -Is)"
+
+echo "Waiting for outbound internet connectivity..."
+until curl -fsS --max-time 10 https://us.archive.ubuntu.com/ >/dev/null 2>&1; do
+  echo "Internet not reachable yet, retrying in 30s..."
+  sleep 30
+done
+echo "Network ready: $(date -Is)"
+
+# ==============================================================================
+# FSS NFS Mounts
+# ------------------------------------------------------------------------------
+# Mount before domain join so mkhomedir creates AD user home dirs on FSS,
+# matching the AWS EFS pattern where /home is shared across instances.
+# ==============================================================================
+
+echo "Mounting FSS /nfs from $MT_IP"
+mkdir -p /nfs
+mount -o nfsvers=3 "$MT_IP":/nfs /nfs
+echo "$MT_IP:/nfs  /nfs  nfs  _netdev,nfsvers=3  0  0" >> /etc/fstab
+
+mkdir -p /nfs/data /nfs/home
+
+# Symlink /home -> /nfs/home so AD user homes live on FSS without a
+# separate export or fstab entry.
+mv /home /home.local
+ln -s /nfs/home /home
+cp -a /home.local/. /nfs/home/
+
 systemctl daemon-reload
-mount /efs
+echo "FSS mounts complete: $(date -Is)"
+echo "DEBUG: active NFS mounts:"
+mount | grep nfs || echo "WARNING: no NFS mounts found"
+df -h /nfs || true
 
-mkdir -p /efs/home /efs/data
-echo "${efs_mnt_server}:/home /home  efs   _netdev,tls  0 0" >> /etc/fstab
-systemctl daemon-reload
-mount /home
+# Wait for DC Kerberos — DNS resolving the domain is not enough; the full AD
+# stack (Kerberos, LDAP) takes longer after the DC reboots post-provision.
+echo "Waiting for DC Kerberos on $DOMAIN_FQDN..."
+until echo "$ADMIN_PASSWORD" | kinit "$ADMIN_USERNAME@${domain_fqdn_upper}" 2>/dev/null; do
+  echo "Kerberos not ready yet, retrying in 30s..."
+  sleep 30
+done
+kdestroy 2>/dev/null || true
+echo "DC Kerberos ready: $(date -Is)"
 
-# Section 3: Join Active Directory domain.
-secretValue="$(aws secretsmanager get-secret-value --secret-id "${admin_secret}" \
-  --query SecretString --output text)"
+# Join AD domain — retry loop in case LDAP/SMB are still initialising
+echo "Joining domain $DOMAIN_FQDN as $ADMIN_USERNAME"
+for i in {1..10}; do
+  if echo "$ADMIN_PASSWORD" | realm join --membership-software=samba -U "$ADMIN_USERNAME" "$DOMAIN_FQDN" --verbose; then
+    echo "Domain join succeeded on attempt $i"
+    break
+  fi
+  if [ "$i" -eq 10 ]; then
+    echo "ERROR: domain join failed after 10 attempts"
+    exit 1
+  fi
+  echo "Domain join failed (attempt $i/10), retrying in 30s..."
+  sleep 30
+done
+echo "DEBUG: realm list output:"
+realm list || true
 
-admin_password="$(echo "$secretValue" | jq -r '.password')"
-admin_username="$(echo "$secretValue" | jq -r '.username' | sed 's/.*\\//')"
+# SSH: allow password authentication for AD users
+if [ -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf ]; then
+  sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' \
+    /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+else
+  sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/g' /etc/ssh/sshd_config || true
+fi
 
-echo -e "$admin_password" | /usr/sbin/realm join --membership-software=samba \
-  -U "$admin_username" "${domain_fqdn}" --verbose
-
-# Section 4: Enable password authentication for AD users.
-sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' \
-  /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
-
-# Section 5: Configure SSSD for AD integration.
-sed -i 's/use_fully_qualified_names = True/use_fully_qualified_names = False/g' \
-  /etc/sssd/sssd.conf
-sed -i 's/ldap_id_mapping = True/ldap_id_mapping = False/g' \
-  /etc/sssd/sssd.conf
-sed -i 's|fallback_homedir = /home/%u@%d|fallback_homedir = /home/%u|' \
-  /etc/sssd/sssd.conf
-sed -i -e 's/^access_provider *= *.*/access_provider = simple/' \
-  /etc/sssd/sssd.conf
+# SSSD tweaks
+if [ -f /etc/sssd/sssd.conf ]; then
+  sed -i 's/use_fully_qualified_names = True/use_fully_qualified_names = False/g' /etc/sssd/sssd.conf || true
+  sed -i 's/ldap_id_mapping = True/ldap_id_mapping = False/g' /etc/sssd/sssd.conf || true
+  sed -i 's|fallback_homedir = /home/%u@%d|fallback_homedir = /home/%u|g' /etc/sssd/sssd.conf || true
+  sed -i '/^\[nss\]/a entry_negative_timeout = 0' /etc/sssd/sssd.conf || true
+  sed -i '/^\[domain\//a offline_timeout = 60' /etc/sssd/sssd.conf || true
+  chmod 600 /etc/sssd/sssd.conf || true
+fi
 
 touch /etc/skel/.Xauthority
 chmod 600 /etc/skel/.Xauthority
 
-pam-auth-update --enable mkhomedir
-systemctl restart ssh
+pam-auth-update --enable mkhomedir || true
+systemctl restart sssd || true
+systemctl restart ssh || systemctl restart sshd || true
 
-# Section 6: Configure Samba file server.
-systemctl stop sssd
+# Sudoers for linux-admins group (idempotent)
+SUDO_FILE=/etc/sudoers.d/10-linux-admins
+if [ ! -f "$SUDO_FILE" ]; then
+  echo "%linux-admins ALL=(ALL) NOPASSWD:ALL" > "$SUDO_FILE"
+  chmod 440 "$SUDO_FILE"
+fi
 
-cat <<EOT > /etc/samba/smb.conf
+# ==============================================================================
+# Samba SMB Gateway
+# ------------------------------------------------------------------------------
+# Samba uses the machine keytab written by realm join (adcli) at
+# /etc/krb5.keytab — no separate "net ads join" needed.
+# Windows clients map Z: to \\<this-ip>\nfs via the [nfs] share.
+# ==============================================================================
+
+systemctl stop sssd || true
+
+# Derive NetBIOS name from hostname (max 15 chars, no dashes, uppercase)
+RAW_HOSTNAME=$(head /etc/hostname -c 15)
+NETBIOS_NAME=$(echo "$RAW_HOSTNAME" | tr '[:lower:]' '[:upper:]')
+
+cat > /etc/samba/smb.conf <<EOF
 [global]
 workgroup = ${netbios}
 security = ads
 
-# Performance tuning
 strict sync = no
 sync always = no
 aio read size = 1
@@ -90,25 +167,27 @@ printcap name = cups
 load printers = yes
 cups options = raw
 
+# Uses the machine keytab created by realm join — no net ads join needed
 kerberos method = secrets and keytab
+
+netbios name = $NETBIOS_NAME
 
 template homedir = /home/%U
 template shell = /bin/bash
-#netbios
 
 create mask = 0770
 force create mode = 0770
 directory mask = 0770
-force group = ${force_group}
+force group = ${lower(netbios)}-users
 
-realm = ${realm}
+realm = ${domain_fqdn_upper}
 
-idmap config ${realm} : backend = sss
-idmap config ${realm} : range = 10000-1999999999
+idmap config ${domain_fqdn_upper} : backend = sss
+idmap config ${domain_fqdn_upper} : range = 10000-1999999999
 idmap config * : backend = tdb
 idmap config * : range = 1-9999
-
 min domain uid = 0
+
 winbind use default domain = yes
 winbind normalize names = yes
 winbind refresh tickets = yes
@@ -117,80 +196,68 @@ winbind enum groups = yes
 winbind enum users = yes
 winbind cache time = 30
 idmap cache time = 60
-winbind negative cache time = 0
 
 [homes]
-comment = Home Directories
-browseable = No
-read only = No
-inherit acls = Yes
+browseable = no
+read only = no
+inherit acls = yes
 
-[efs]
-comment = Mounted EFS area
-path = /efs
+[nfs]
+path = /nfs
 read only = no
 guest ok = no
-EOT
+EOF
 
-# NetBIOS name patch
-head -c 15 /etc/hostname > /tmp/netbios-name
-value="$(tr -d '-' < /tmp/netbios-name | tr '[:lower:]' '[:upper:]')"
-netbios="$${value^^}"
-sed -i "s/#netbios/netbios name=${netbios}/g" /etc/samba/smb.conf
-
-cat <<EOT > /etc/nsswitch.conf
+# NSS: add winbind alongside sssd so Samba can resolve AD users for SMB auth
+cat > /etc/nsswitch.conf <<EOF
 passwd:     files sss winbind
 group:      files sss winbind
 automount:  files sss winbind
 shadow:     files sss winbind
 hosts:      files dns myhostname
-bootparams: nisplus [NOTFOUND=return] files
-ethers:     files
-netmasks:   files
-networks:   files
-protocols:  files
-rpc:        files
 services:   files sss
 netgroup:   files sss
-publickey:  nisplus
-aliases:    files nisplus
-EOT
+EOF
 
-systemctl restart winbind smb nmb sssd
+systemctl restart winbind smb nmb sssd || true
+systemctl restart ssh || systemctl restart sshd || true
 
-# Section 7: Grant sudo privileges to AD admin group.
-echo "%linux-admins ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/10-linux-admins
-chmod 440 /etc/sudoers.d/10-linux-admins
+echo "DEBUG: testparm output:"
+testparm -s 2>&1 || true
+echo "DEBUG: wbinfo -u:"
+wbinfo -u 2>&1 || true
+echo "DEBUG: wbinfo -g:"
+wbinfo -g 2>&1 || true
+echo "DEBUG: getent group ${lower(netbios)}-users:"
+getent group "${lower(netbios)}-users" 2>&1 || true
 
-# Section 8: Enforce home directory permissions and seed test users.
-sed -i 's/^\(\s*HOME_MODE\s*\)[0-9]\+/\10700/' /etc/login.defs
+# ==============================================================================
+# Permissions and Seed Content
+# ==============================================================================
 
-su -c "exit" rpatel
-su -c "exit" jsmith
-su -c "exit" akumar
-su -c "exit" edavis
+# Pre-create home dirs for domain users on FSS so permissions are correct
+# before first login — mkhomedir handles subsequent users automatically.
+for user in rpatel jsmith akumar edavis; do
+  su -c "exit" "$user" 2>/dev/null || true
+done
 
-chgrp mcloud-users /efs /efs/data
-chmod 770 /efs /efs/data
-chmod 700 /home/* || true
+chgrp "${lower(netbios)}-users" /nfs /nfs/data
+chmod 775 /nfs /nfs/data
+chmod 700 /home/* 2>/dev/null || true
+echo "DEBUG: /nfs ownership:"
+ls -la /nfs || true
 
-cd /efs
-git clone https://github.com/mamonaco1973/aws-xubuntu-xrdp.git
-chmod -R 775 aws-xubuntu-xrdp
-chgrp -R mcloud-users aws-xubuntu-xrdp
+cd /nfs
+git clone https://github.com/mamonaco1973/oci-xubuntu-xrdp.git
+chmod -R 775 oci-xubuntu-xrdp
+chgrp -R "${lower(netbios)}-users" oci-xubuntu-xrdp
 
-git clone https://github.com/mamonaco1973/aws-setup.git
-chmod -R 775 aws-setup
-chgrp -R mcloud-users aws-setup
+netfilter-persistent save
 
-git clone https://github.com/mamonaco1973/azure-setup.git
-chmod -R 775 azure-setup
-chgrp -R mcloud-users azure-setup
+realm list || true
 
-git clone https://github.com/mamonaco1973/gcp-setup.git
-chmod -R 775 gcp-setup
-chgrp -R mcloud-users gcp-setup
+ln -sf /nfs /etc/skel/nfs
+mkdir -p /home/ubuntu
+chown -R ubuntu:ubuntu /home/ubuntu || true
 
-echo "================================================================================"
 echo "user-data complete: $(date -Is)"
-echo "================================================================================"

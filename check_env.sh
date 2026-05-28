@@ -1,50 +1,43 @@
 #!/bin/bash
 # ==============================================================================
 # check_env.sh - Environment Validation
-# ------------------------------------------------------------------------------
-# Purpose:
-#   - Validates that required CLI tools are available in the current PATH.
-#   - Verifies AWS CLI authentication and connectivity.
-#
-# Scope:
-#   - Checks for aws, terraform, and jq binaries.
-#   - Confirms the caller identity via AWS STS.
-#
-# Fast-Fail Behavior:
-#   - Script exits immediately on command failure, unset variables,
-#     or failed pipelines.
-#
-# Requirements:
-#   - AWS CLI installed and configured.
-#   - Terraform installed.
-#   - jq installed.
 # ==============================================================================
 
 set -euo pipefail
 
-# ------------------------------------------------------------------------------
-# Required Commands
-# ------------------------------------------------------------------------------
 echo "NOTE: Validating required commands in PATH."
 
-commands=("aws" "terraform" "jq" "packer")
+commands=("oci" "terraform" "jq" "packer")
 
 for cmd in "${commands[@]}"; do
   if ! command -v "${cmd}" >/dev/null 2>&1; then
     echo "ERROR: Required command not found: ${cmd}"
     exit 1
   fi
-
   echo "NOTE: Found required command: ${cmd}"
 done
 
 echo "NOTE: All required commands are available."
 
 # ------------------------------------------------------------------------------
-# AWS Connectivity Check
+# OCI Auth Check
 # ------------------------------------------------------------------------------
-echo "NOTE: Verifying AWS CLI connectivity..."
+echo "NOTE: Checking OCI_COMPARTMENT_ID environment variable."
+if [ -z "${OCI_COMPARTMENT_ID:-}" ]; then
+  tenancy=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+  if [ -z "$tenancy" ]; then
+    echo "ERROR: OCI_COMPARTMENT_ID is not set and tenancy could not be read from ~/.oci/config."
+    exit 1
+  fi
+  echo "WARNING: OCI_COMPARTMENT_ID not set — will use tenancy OCID from ~/.oci/config."
+else
+  echo "NOTE: OCI_COMPARTMENT_ID is set."
+fi
 
-aws sts get-caller-identity --query "Account" --output text >/dev/null
+echo "NOTE: Checking OCI CLI connection."
+if ! oci os ns get > /dev/null 2>&1; then
+  echo "ERROR: Failed to connect to OCI. Check your ~/.oci/config."
+  exit 1
+fi
 
-echo "NOTE: AWS CLI authentication successful."
+echo "NOTE: OCI CLI authentication successful."

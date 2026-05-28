@@ -1,115 +1,87 @@
 #!/bin/bash
 # ==============================================================================
-# AD + Server Infrastructure Teardown Script
+# destroy.sh - Xubuntu XRDP Infrastructure Teardown (OCI)
 # ------------------------------------------------------------------------------
-# Performs controlled teardown of deployed AWS resources:
-#   1. Destroy EC2 servers (Terraform).
-#   2. Deregister Packer-built AMIs and delete snapshots.
-#   3. Delete AD secrets and destroy AD infrastructure.
+# Destroys the environment in controlled order:
+#   1. Client compute instances (03-servers).
+#   2. Packer-built custom Xubuntu image.
+#   3. Active Directory resources and networking (01-directory).
 #
-# WARNING:
-#   - Secrets are deleted with no recovery window.
-#   - Requires AWS CLI and Terraform configured.
-#   - Intended for full environment removal.
-#
-# Exit Codes:
-#   - 0 : Success.
-#   - 1 : Missing dirs or Terraform/AWS CLI failure.
+# WARNING: This action is destructive and irreversible.
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------------------
-export AWS_DEFAULT_REGION="us-east-1"
-set -e
-
+set -euo pipefail
 
 # ------------------------------------------------------------------------------
-# Phase 1: Destroy EC2 Server Instances
+# Optional: Override AD domain settings (must match apply.sh values)
 # ------------------------------------------------------------------------------
-# Removes all resources defined in 03-servers Terraform module.
-# ------------------------------------------------------------------------------
-echo "NOTE: Destroying EC2 server instances..."
+# export TF_VAR_dns_zone="lab.mikecloud.com"
+# export TF_VAR_realm="LAB.MIKECLOUD.COM"
+# export TF_VAR_netbios="LAB"
+# export TF_VAR_user_base_dn="CN=Users,DC=lab,DC=mikecloud,DC=com"
 
-cd 03-servers || { echo "ERROR: Missing 03-servers dir"; exit 1; }
+# Resolve compartment — fall back to tenancy OCID if OCI_COMPARTMENT_ID is unset
+if [ -z "${OCI_COMPARTMENT_ID:-}" ]; then
+  OCI_COMPARTMENT_ID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+fi
+export TF_VAR_compartment_ocid="$OCI_COMPARTMENT_ID"
+
+TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+export TF_VAR_tenancy_ocid="$TENANCY_OCID"
+
+# TF_VAR_xubuntu_image_ocid must be set for terraform destroy to parse the plan;
+# use a placeholder — the actual resource was already tracked in state.
+export TF_VAR_xubuntu_image_ocid="ocid1.image.placeholder"
+
+# ------------------------------------------------------------------------------
+# Phase 1: Destroy Compute Instances
+# ------------------------------------------------------------------------------
+echo "NOTE: Destroying OCI compute instances..."
+
+cd 03-servers || { echo "ERROR: Directory 03-servers not found"; exit 1; }
 
 terraform init
 terraform destroy -auto-approve
 
-cd .. || exit
-
+cd ..
 
 # ------------------------------------------------------------------------------
-# Phase 2: Deregister AMIs and Delete Snapshots
+# Phase 2: Delete Packer-Built Custom Images
 # ------------------------------------------------------------------------------
-# Removes AMIs matching xubuntu_ami* pattern and deletes snapshots.
+# Removes all custom images named "xubuntu-image" from the compartment.
+# These are not managed by Terraform so must be deleted via OCI CLI.
 # ------------------------------------------------------------------------------
-echo "NOTE: Deregistering project AMIs and deleting snapshots..."
+echo "NOTE: Deleting Packer-built custom images..."
 
-for ami_id in $(aws ec2 describe-images \
-    --owners self \
-    --filters "Name=name,Values=xubuntu_ami*" \
-    --query "Images[].ImageId" \
-    --output text); do
+IMAGE_IDS=$(oci compute image list \
+  --compartment-id "$OCI_COMPARTMENT_ID" \
+  --lifecycle-state "AVAILABLE" \
+  --all \
+  --raw-output \
+  | jq -r '.data[] | select(."display-name" == "xubuntu-image") | .id')
 
-  for snapshot_id in $(aws ec2 describe-images \
-      --image-ids "$ami_id" \
-      --query "Images[].BlockDeviceMappings[].Ebs.SnapshotId" \
-      --output text); do
-
-    echo "NOTE: Deregistering AMI: $ami_id"
-    aws ec2 deregister-image --image-id "$ami_id"
-
-    echo "NOTE: Deleting snapshot: $snapshot_id"
-    aws ec2 delete-snapshot --snapshot-id "$snapshot_id"
-
+if [ -z "$IMAGE_IDS" ]; then
+  echo "NOTE: No xubuntu-image custom images found."
+else
+  for IMAGE_ID in $IMAGE_IDS; do
+    echo "NOTE: Deleting image: $IMAGE_ID"
+    oci compute image delete --image-id "$IMAGE_ID" --force
   done
-done
-
+fi
 
 # ------------------------------------------------------------------------------
-# Phase 3: Destroy AD Resources
+# Phase 3: Destroy Active Directory Infrastructure
 # ------------------------------------------------------------------------------
-# Permanently delete AD Secrets Manager entries and destroy AD module.
-# ------------------------------------------------------------------------------
-echo "NOTE: Deleting AD secrets..."
+echo "NOTE: Destroying Active Directory resources and networking..."
 
-aws secretsmanager delete-secret \
-  --secret-id "akumar_ad_credentials_xubuntu" \
-  --force-delete-without-recovery
-
-aws secretsmanager delete-secret \
-  --secret-id "jsmith_ad_credentials_xubuntu" \
-  --force-delete-without-recovery
-
-aws secretsmanager delete-secret \
-  --secret-id "edavis_ad_credentials_xubuntu" \
-  --force-delete-without-recovery
-
-aws secretsmanager delete-secret \
-  --secret-id "rpatel_ad_credentials_xubuntu" \
-  --force-delete-without-recovery
-
-aws secretsmanager delete-secret \
-  --secret-id "admin_ad_credentials_xubuntu" \
-  --force-delete-without-recovery
-
-
-echo "NOTE: Destroying AD Terraform resources..."
-
-cd 01-directory || { echo "ERROR: Missing 01-directory dir"; exit 1; }
+cd 01-directory || { echo "ERROR: Directory 01-directory not found"; exit 1; }
 
 terraform init
 terraform destroy -auto-approve
 
-cd .. || exit
+cd ..
 
+# Remove generated key pair so next apply produces a fresh one
+rm -f 01-directory/keys/Private_Key 01-directory/keys/Private_Key.pub
 
-# ------------------------------------------------------------------------------
-# Completion
-# ------------------------------------------------------------------------------
-echo "NOTE: Infrastructure teardown complete."
-
-# ==============================================================================
-# End of Script
-# ==============================================================================
+echo "NOTE: Infrastructure destruction complete."

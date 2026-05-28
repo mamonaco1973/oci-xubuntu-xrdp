@@ -1,111 +1,106 @@
-# ================================================================================
-# FILE: security_groups.tf
-# ================================================================================
-#
+# ==============================================================================
+# Network Security Groups: Remote Access (Lab Defaults)
+# ------------------------------------------------------------------------------
 # Purpose:
-#   Define baseline security groups for lab access to Windows and Linux
-#   instances in the mini-AD VPC.
-#
-# Design:
-#   - ad_rdp_sg:
-#       * Inbound RDP (TCP/3389) for Windows remote desktop access.
-#       * Inbound ICMP for basic reachability testing.
-#   - ad_ssh_sg:
-#       * Inbound SSH (TCP/22) for Linux administration.
-#       * Inbound SMB (TCP/445) for Samba/SMB testing.
-#       * Inbound ICMP for basic reachability testing.
-#   - Both SGs allow all outbound traffic.
-#
-# Security Notes:
-#   - Ingress rules are intentionally open (0.0.0.0/0) for lab/demo use.
-#   - DO NOT use these rules in production. Restrict inbound access to:
-#       * Your public IP (preferred for single admin)
-#       * A corporate VPN CIDR
-#       * A bastion SG / SSM-only access model
-#
-# ================================================================================
+#   - NSG for Xubuntu instance: SSH (22), RDP/XRDP (3389), SMB (445).
+#   - NSG for Windows instance: RDP (3389).
+# NOTE: Open to 0.0.0.0/0 for lab convenience — restrict in production.
+# SMB ingress is scoped to vm-subnet CIDR — only Windows (same subnet) connects.
+# ==============================================================================
 
+# ==============================================================================
+# NSG: SSH (Xubuntu management)
+# ==============================================================================
 
-# ================================================================================
-# SECTION: Security Group - RDP + ICMP (Windows Access)
-# ================================================================================
+resource "oci_core_network_security_group" "ssh_nsg" {
+  compartment_id = local.compartment_ocid
+  vcn_id         = local.vcn_id
+  display_name   = "xubuntu-ssh-nsg"
+}
 
-# Allow RDP and ICMP to Windows hosts (demo-only open ingress).
-resource "aws_security_group" "ad_rdp_sg" {
-  name        = "ad-rdp-security-group"
-  description = "Allow RDP access from the internet"
-  vpc_id      = data.aws_vpc.ad_vpc.id
-
-  # Allow RDP (TCP/3389) from anywhere (demo-only).
-  ingress {
-    description = "Allow RDP from anywhere"
-    from_port   = 3389
-    to_port     = 3389
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Allow ICMP (ping) from anywhere (demo-only).
-  ingress {
-    description = "Allow ICMP (ping) from anywhere"
-    from_port   = -1
-    to_port     = -1
-    protocol    = "icmp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Allow all outbound traffic.
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "oci_core_network_security_group_security_rule" "ssh_ingress" {
+  network_security_group_id = oci_core_network_security_group.ssh_nsg.id
+  direction                 = "INGRESS"
+  protocol                  = "6"
+  source                    = "0.0.0.0/0"
+  source_type               = "CIDR_BLOCK"
+  tcp_options {
+    destination_port_range {
+      min = 22
+      max = 22
+    }
   }
 }
 
+resource "oci_core_network_security_group_security_rule" "ssh_egress" {
+  network_security_group_id = oci_core_network_security_group.ssh_nsg.id
+  direction                 = "EGRESS"
+  protocol                  = "all"
+  destination               = "0.0.0.0/0"
+  destination_type          = "CIDR_BLOCK"
+}
 
-# ================================================================================
-# SECTION: Security Group - SSH + SMB + ICMP (Linux Access)
-# ================================================================================
+# ==============================================================================
+# NSG: RDP (Xubuntu XRDP desktop + Windows RDP — shared)
+# ==============================================================================
 
-# Allow SSH, SMB, and ICMP to Linux hosts (demo-only open ingress).
-resource "aws_security_group" "ad_ssh_sg" {
-  name        = "ad-ssh-security-group"
-  description = "Allow SSH access from the internet"
-  vpc_id      = data.aws_vpc.ad_vpc.id
+resource "oci_core_network_security_group" "rdp_nsg" {
+  compartment_id = local.compartment_ocid
+  vcn_id         = local.vcn_id
+  display_name   = "xubuntu-rdp-nsg"
+}
 
-  # Allow SSH (TCP/22) from anywhere (demo-only).
-  ingress {
-    description = "Allow SSH from anywhere"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "oci_core_network_security_group_security_rule" "rdp_ingress" {
+  network_security_group_id = oci_core_network_security_group.rdp_nsg.id
+  direction                 = "INGRESS"
+  protocol                  = "6"
+  source                    = "0.0.0.0/0"
+  source_type               = "CIDR_BLOCK"
+  tcp_options {
+    destination_port_range {
+      min = 3389
+      max = 3389
+    }
   }
+}
 
-  # Allow SMB (TCP/445) from anywhere (demo-only).
-  ingress {
-    description = "Allow SMB from anywhere"
-    from_port   = 445
-    to_port     = 445
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "oci_core_network_security_group_security_rule" "rdp_egress" {
+  network_security_group_id = oci_core_network_security_group.rdp_nsg.id
+  direction                 = "EGRESS"
+  protocol                  = "all"
+  destination               = "0.0.0.0/0"
+  destination_type          = "CIDR_BLOCK"
+}
 
-  # Allow ICMP (ping) from anywhere (demo-only).
-  ingress {
-    description = "Allow ICMP (ping) from anywhere"
-    from_port   = -1
-    to_port     = -1
-    protocol    = "icmp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+# ==============================================================================
+# NSG: SMB (Xubuntu Samba gateway — Windows maps Z: to \\<xubuntu-ip>\nfs)
+# ==============================================================================
 
-  # Allow all outbound traffic.
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "oci_core_network_security_group" "smb_nsg" {
+  compartment_id = local.compartment_ocid
+  vcn_id         = local.vcn_id
+  display_name   = "xubuntu-smb-nsg"
+}
+
+resource "oci_core_network_security_group_security_rule" "smb_ingress" {
+  network_security_group_id = oci_core_network_security_group.smb_nsg.id
+  direction                 = "INGRESS"
+  protocol                  = "6"
+  # Scoped to vm-subnet — only Windows instance (same subnet) connects
+  source                    = "10.0.0.64/26"
+  source_type               = "CIDR_BLOCK"
+  tcp_options {
+    destination_port_range {
+      min = 445
+      max = 445
+    }
   }
+}
+
+resource "oci_core_network_security_group_security_rule" "smb_egress" {
+  network_security_group_id = oci_core_network_security_group.smb_nsg.id
+  direction                 = "EGRESS"
+  protocol                  = "all"
+  destination               = "0.0.0.0/0"
+  destination_type          = "CIDR_BLOCK"
 }

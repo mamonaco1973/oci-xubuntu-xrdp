@@ -1,82 +1,46 @@
 #!/bin/bash
-# ================================================================================
-# FILE: validate.sh
-# ================================================================================
-#
-# Purpose:
-#   Validate the deployment by locating key instance endpoints and
-#   printing a clean, aligned summary for quick copy/paste access.
-#
-# What This Script Does:
-#   - Queries EC2 for instances by Name tag.
-#   - Extracts Public DNS names (for RDP / SSH / XRDP access paths).
-#
-# Requirements:
-#   - AWS CLI installed and configured with appropriate permissions.
-#   - Instances must be tagged:
-#       * Name = windows-ad-admin
-#       * Name = mate-instance
-#
-# Output:
-#   - Prints a short banner and aligned key/value lines.
-#
-# ================================================================================
-
 set -euo pipefail
 
-# ================================================================================
-# SECTION: Configuration
-# ================================================================================
+# ==============================================================================
+# 01-directory outputs
+# ==============================================================================
 
-export AWS_DEFAULT_REGION="us-east-1"
+DC_IP=$(cd 01-directory && terraform output -raw dc_private_ip 2>/dev/null || echo "")
+BASTION_ID=$(cd 01-directory && terraform output -raw bastion_id 2>/dev/null || echo "")
+NETBIOS=$(cd 01-directory && terraform output -raw netbios 2>/dev/null || echo "MCLOUD")
 
-# ================================================================================
-# SECTION: Helpers
-# ================================================================================
+# ==============================================================================
+# 03-servers outputs
+# ==============================================================================
 
-get_public_dns_by_name_tag() {
-  local name_tag="$1"
+XUBUNTU_IP=$(cd 03-servers && terraform output -raw xubuntu_public_ip 2>/dev/null || echo "")
+WINDOWS_IP=$(cd 03-servers && terraform output -raw windows_public_ip 2>/dev/null || echo "")
 
-  aws ec2 describe-instances \
-    --filters "Name=tag:Name,Values=${name_tag}" \
-    --query "Reservations[].Instances[].PublicDnsName" \
-    --output text | xargs
-}
+# ==============================================================================
+# Summary banner
+# ==============================================================================
 
-print_kv() {
-  local key="$1"
-  local value="$2"
-
-  printf "%-28s %s\n" "${key}:" "${value}"
-}
-
-# ================================================================================
-# SECTION: Lookup Endpoints
-# ================================================================================
-
-windows_dns="$(get_public_dns_by_name_tag "xubuntu-ad-admin")"
-mate_dns="$(get_public_dns_by_name_tag "xubuntu-instance")"
-
-# ================================================================================
-# SECTION: Output
-# ================================================================================
-
-echo "==============================================================================="
-echo "VALIDATION RESULTS: AD + XUBUNTU DESKTOP"
-echo "==============================================================================="
-echo
-
-if [ -z "${windows_dns}" ]; then
-  print_kv "Windows AD Admin Host" "NOT FOUND (Name=xubuntu-ad-admin)"
-else
-  print_kv "Windows AD Admin Host" "${windows_dns}"
-fi
-
-if [ -z "${mate_dns}" ]; then
-  print_kv "Xubuntu Desktop Host" "NOT FOUND (Name=xubuntu-instance)"
-else
-  print_kv "Xubuntu Desktop Host" "${mate_dns}"
-fi
-
-echo
-echo "==============================================================================="
+echo ""
+echo "============================================================================"
+echo "Xubuntu XRDP - Deployment Summary"
+echo "============================================================================"
+echo ""
+echo "  Domain Controller (private)"
+echo "    IP       : ${DC_IP:-not deployed}"
+echo "    Connect  : ./connect.sh"
+echo ""
+echo "  Xubuntu Desktop (public)"
+echo "    IP       : ${XUBUNTU_IP:-not deployed}"
+echo "    RDP      : Connect to ${XUBUNTU_IP:-<ip>}:3389 as ${NETBIOS}\\rpatel"
+echo "    SSH      : ssh -i 01-directory/keys/Private_Key ubuntu@${XUBUNTU_IP:-<ip>}"
+echo "    AD user  : ./get_password.sh rpatel"
+echo ""
+echo "  Windows Client (public)"
+echo "    IP       : ${WINDOWS_IP:-not deployed}"
+echo "    Connect  : RDP to ${WINDOWS_IP:-<ip>} as ${NETBIOS}\\Admin"
+echo ""
+echo "  Passwords  : ./get_password.sh <user>"
+echo "               users: admin jsmith edavis rpatel akumar"
+echo ""
+echo "============================================================================"
+echo ""

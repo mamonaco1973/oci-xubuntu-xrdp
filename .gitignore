@@ -5,3 +5,5 @@
 *.terraform.*
 *.pem
 *.pub
+01-directory/keys/Private_Key
+01-directory/keys/Private_Key.pub

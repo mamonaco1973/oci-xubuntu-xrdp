@@ -1,109 +1,126 @@
 #!/bin/bash
 # ==============================================================================
-# AD + Server Deployment Orchestration Script
+# apply.sh - Xubuntu XRDP Deployment Orchestration (OCI)
 # ------------------------------------------------------------------------------
-# Automates a three-phase build:
+# Three-phase build:
 #   1. Deploy Active Directory resources with Terraform.
-#   2. Build a Xubuntu XRDP AMI with Packer.
-#   3. Deploy EC2 servers and join them to the AD domain.
-#
-# Requirements:
-#   - AWS CLI configured.
-#   - Terraform and Packer installed.
-#   - ./check_env.sh available for pre-check validation.
-#   - ./validate.sh available for post-build verification.
-#
-# Exit Codes:
-#   - 0 : Success.
-#   - 1 : Failed pre-check or missing directories.
+#   2. Build a Xubuntu custom image with Packer (oracle-oci plugin).
+#   3. Deploy OCI compute instances using the Packer-built image.
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------------------
-export AWS_DEFAULT_REGION="us-east-1"
-DNS_ZONE="mcloud.mikecloud.com"
-set -e
+set -euo pipefail
 
+# ------------------------------------------------------------------------------
+# Optional: Override AD domain settings
+# Uncomment and modify to use a custom domain instead of the defaults.
+# ------------------------------------------------------------------------------
+# export TF_VAR_dns_zone="lab.mikecloud.com"
+# export TF_VAR_realm="LAB.MIKECLOUD.COM"
+# export TF_VAR_netbios="LAB"
+# export TF_VAR_user_base_dn="CN=Users,DC=lab,DC=mikecloud,DC=com"
 
 # ------------------------------------------------------------------------------
 # Environment Pre-Check
 # ------------------------------------------------------------------------------
-# Validate tooling and local prerequisites before starting.
-# ------------------------------------------------------------------------------
 echo "NOTE: Running environment validation..."
 ./check_env.sh
-if [ $? -ne 0 ]; then
-  echo "ERROR: Environment check failed. Exiting."
-  exit 1
+
+# Resolve compartment — fall back to tenancy OCID if OCI_COMPARTMENT_ID is unset
+if [ -z "${OCI_COMPARTMENT_ID:-}" ]; then
+  OCI_COMPARTMENT_ID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
 fi
+export TF_VAR_compartment_ocid="$OCI_COMPARTMENT_ID"
 
+# Dynamic groups must live in the root tenancy — always extract from config
+TENANCY_OCID=$(awk -F'=' '/^tenancy[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' ~/.oci/config)
+export TF_VAR_tenancy_ocid="$TENANCY_OCID"
 
 # ------------------------------------------------------------------------------
-# Phase 1: Build AD Instance
+# Phase 1: Active Directory Deployment
 # ------------------------------------------------------------------------------
-# Deploy AD first to ensure DNS and domain join prerequisites exist.
-# ------------------------------------------------------------------------------
-echo "NOTE: Building Active Directory instance..."
+echo "NOTE: Deploying Active Directory resources..."
 
-cd 01-directory || { echo "ERROR: Missing 01-directory dir"; exit 1; }
+cd 01-directory || { echo "ERROR: Directory 01-directory not found"; exit 1; }
 
 terraform init
 terraform apply -auto-approve
 
-cd .. || exit
-
+cd ..
 
 # ------------------------------------------------------------------------------
-# Phase 2: Build Xubuntu XRDP AMI with Packer
+# Phase 2: Build Xubuntu Custom Image with Packer
 # ------------------------------------------------------------------------------
-# Resolve network values from the target VPC/subnet, then build the AMI.
+# Resolve the build parameters from OCI CLI + 01-directory outputs before
+# invoking Packer so the build instance lands in the correct subnet.
 # ------------------------------------------------------------------------------
-vpc_id=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:Name,Values=xubuntu-vpc" \
-  --query "Vpcs[0].VpcId" \
-  --output text)
+echo "NOTE: Resolving Packer build parameters..."
 
-subnet_id=$(aws ec2 describe-subnets \
-  --filters \
-    "Name=vpc-id,Values=${vpc_id}" \
-    "Name=tag:Name,Values=vm-subnet-1" \
-  --query "Subnets[0].SubnetId" \
-  --output text)
+SUBNET_OCID=$(cd 01-directory && terraform output -raw vm_subnet_ocid)
 
-cd 02-packer || { echo "ERROR: Missing 02-packer dir"; exit 1; }
+AD=$(oci iam availability-domain list \
+  --compartment-id "$OCI_COMPARTMENT_ID" \
+  --query 'data[0].name' \
+  --raw-output)
 
-echo "NOTE: Building Xubuntu XRDP AMI with Packer..."
+# Get the latest Canonical Ubuntu 24.04 image OCID for E4.Flex
+BASE_IMAGE_OCID=$(oci compute image list \
+  --compartment-id "$OCI_COMPARTMENT_ID" \
+  --operating-system "Canonical Ubuntu" \
+  --operating-system-version "24.04" \
+  --shape "VM.Standard.E4.Flex" \
+  --lifecycle-state "AVAILABLE" \
+  --sort-by TIMECREATED \
+  --sort-order DESC \
+  --query 'data[0].id' \
+  --raw-output)
+
+echo "NOTE: Availability domain : $AD"
+echo "NOTE: Base image OCID     : $BASE_IMAGE_OCID"
+echo "NOTE: Subnet OCID         : $SUBNET_OCID"
+
+cd 02-packer || { echo "ERROR: Directory 02-packer not found"; exit 1; }
+
+echo "NOTE: Building Xubuntu custom image with Packer..."
 
 packer init ./xubuntu_ami.pkr.hcl
-packer build -var "vpc_id=${vpc_id}" -var "subnet_id=${subnet_id}" \
+packer build \
+  -var "compartment_ocid=$OCI_COMPARTMENT_ID" \
+  -var "availability_domain=$AD" \
+  -var "base_image_ocid=$BASE_IMAGE_OCID" \
+  -var "subnet_ocid=$SUBNET_OCID" \
   ./xubuntu_ami.pkr.hcl || {
     echo "ERROR: Packer build failed. Aborting."
     cd ..
     exit 1
   }
 
-cd .. || exit
+cd ..
 
+# Resolve the OCID of the image Packer just created
+XUBUNTU_IMAGE_OCID=$(oci compute image list \
+  --compartment-id "$OCI_COMPARTMENT_ID" \
+  --lifecycle-state "AVAILABLE" \
+  --all \
+  --raw-output \
+  | jq -r '[.data[] | select(."display-name" == "xubuntu-image")] | sort_by(."time-created") | last | .id')
+
+if [ -z "$XUBUNTU_IMAGE_OCID" ] || [ "$XUBUNTU_IMAGE_OCID" = "null" ]; then
+  echo "ERROR: Could not find xubuntu-image in OCI compute images after Packer build."
+  exit 1
+fi
+export TF_VAR_xubuntu_image_ocid="$XUBUNTU_IMAGE_OCID"
+echo "NOTE: Xubuntu image OCID  : $XUBUNTU_IMAGE_OCID"
 
 # ------------------------------------------------------------------------------
-# Phase 3: Build EC2 Server Instances
+# Phase 3: Deploy OCI Compute Instances
 # ------------------------------------------------------------------------------
-# Deploy servers after AMI build completes.
-# ------------------------------------------------------------------------------
-echo "NOTE: Building EC2 server instances..."
+echo "NOTE: Deploying OCI compute instances..."
 
-cd 03-servers || { echo "ERROR: Missing 03-servers dir"; exit 1; }
+cd 03-servers || { echo "ERROR: Directory 03-servers not found"; exit 1; }
 
 terraform init
 terraform apply -auto-approve
 
-cd .. || exit
+cd ..
 
-
-# ------------------------------------------------------------------------------
-# Build Validation
-# ------------------------------------------------------------------------------
-# Run post-build validation checks.
-# ------------------------------------------------------------------------------
 ./validate.sh

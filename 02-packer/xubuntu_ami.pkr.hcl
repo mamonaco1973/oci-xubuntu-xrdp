@@ -1,126 +1,111 @@
 # ==============================================================================
-# Packer Build: Xubuntu AMI on Ubuntu 24.04 (Noble)
+# Packer Build: Xubuntu Custom Image on OCI Ubuntu 24.04 (Noble)
 # ------------------------------------------------------------------------------
 # Purpose:
-#   - Build a custom AMI for Xubuntu + XRDP.
-#   - Start from Canonical Ubuntu 24.04 (Noble) AMI.
-#   - Run provisioning scripts to install desktop and tools.
-#   - Output a timestamped AMI for Terraform or EC2 launches.
+#   - Build a custom OCI compute image with Xubuntu + XRDP pre-installed.
+#   - Start from the Canonical Ubuntu 24.04 base image in OCI.
+#   - Run provisioning scripts to install the desktop, tools, and AD packages.
+#   - Output a named custom image for Terraform to reference in 03-servers.
 #
 # Notes:
-#   - Requires outbound internet during provisioning.
-#   - vpc_id/subnet_id may be empty to use default network.
+#   - compartment_ocid, availability_domain, base_image_ocid, and subnet_ocid
+#     are passed in from apply.sh after resolving them via the OCI CLI.
+#   - The build instance requires outbound internet access (vm-subnet has IGW).
 # ==============================================================================
 
-
-# ------------------------------------------------------------------------------
-# Packer Plugin Configuration
-# ------------------------------------------------------------------------------
-# Defines the Amazon plugin used to interact with AWS services.
-# ------------------------------------------------------------------------------
 packer {
   required_plugins {
-    amazon = {
-      source  = "github.com/hashicorp/amazon" # Official HashiCorp plugin.
-      version = "~> 1"                        # Compatible versions in v1.
+    oracle = {
+      source  = "github.com/hashicorp/oracle"
+      version = "~> 1"
     }
   }
 }
 
-
-# ------------------------------------------------------------------------------
-# Data Source: Base Ubuntu 24.04 AMI
-# ------------------------------------------------------------------------------
-# Fetches the most recent Canonical-owned Ubuntu 24.04 (Noble) AMI.
-# ------------------------------------------------------------------------------
-data "amazon-ami" "ubuntu_2404" {
-  filters = {
-    name                = "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
-    virtualization-type = "hvm"
-    root-device-type    = "ebs"
-  }
-
-  most_recent = true
-  owners      = ["099720109477"] # Canonical AWS account ID.
-}
-
-
 # ------------------------------------------------------------------------------
 # Variables: Build-Time Inputs
 # ------------------------------------------------------------------------------
-# Controls region, instance type, and optional VPC/subnet placement.
+# Resolved by apply.sh from OCI CLI + 01-directory terraform outputs.
 # ------------------------------------------------------------------------------
-variable "region" {
-  default = "us-east-1" # Default AWS region.
-}
 
-variable "instance_type" {
-  default = "m5.2xlarge" # Larger build instance for faster provisioning.
-}
-
-variable "vpc_id" {
-  description = "The ID of the VPC to use."
+variable "compartment_ocid" {
+  description = "OCI compartment OCID for the build instance."
   default     = ""
 }
 
-variable "subnet_id" {
-  description = "The ID of the subnet to use."
+variable "availability_domain" {
+  description = "Availability domain for the temporary build instance."
   default     = ""
 }
 
-
-# ------------------------------------------------------------------------------
-# Amazon-EBS Source Block
-# ------------------------------------------------------------------------------
-# Launches a temporary instance from the base AMI and creates a reusable AMI.
-# ------------------------------------------------------------------------------
-source "amazon-ebs" "xubuntu_ami" {
-  region        = var.region
-  instance_type = var.instance_type
-  source_ami    = data.amazon-ami.ubuntu_2404.id
-  ssh_username  = "ubuntu"
-  ami_name      = "xubuntu_ami_${replace(timestamp(), ":", "-")}"
-  ssh_interface = "public_ip"
-  vpc_id        = var.vpc_id
-  subnet_id     = var.subnet_id
-
-  # ---------------------------------------------------------------------------
-  # Root EBS Volume Configuration
-  # ---------------------------------------------------------------------------
-  launch_block_device_mappings {
-    device_name           = "/dev/sda1"
-    volume_size           = "64"
-    volume_type           = "gp3"
-    delete_on_termination = "true"
-  }
-
-  tags = {
-    Name = "xubuntu_ami_${replace(timestamp(), ":", "-")}"
-  }
+variable "base_image_ocid" {
+  description = "OCID of the base Ubuntu 24.04 image to build from."
+  default     = ""
 }
 
+variable "subnet_ocid" {
+  description = "OCID of the vm-subnet — build instance needs public internet access."
+  default     = ""
+}
+
+# ------------------------------------------------------------------------------
+# Oracle-OCI Source Block
+# ------------------------------------------------------------------------------
+# Launches a temporary OCI instance, runs provisioners, then saves the result
+# as a custom compute image in the compartment.
+# ------------------------------------------------------------------------------
+
+source "oracle-oci" "xubuntu" {
+  compartment_ocid    = var.compartment_ocid
+  availability_domain = var.availability_domain
+  base_image_ocid     = var.base_image_ocid
+  image_name          = "xubuntu-image"
+  shape               = "VM.Standard.E4.Flex"
+
+  shape_config {
+    ocpus         = 4
+    memory_in_gbs = 16
+  }
+
+  create_vnic_details {
+    subnet_id        = var.subnet_ocid
+    assign_public_ip = true
+  }
+
+  disk_size    = 64
+  ssh_username = "ubuntu"
+}
 
 # ------------------------------------------------------------------------------
 # Build Block: Provisioning Scripts
 # ------------------------------------------------------------------------------
 # Runs scripts in order to install desktop components and developer tooling.
+# Package installation happens here (baked into image) so userdata.sh at
+# runtime only needs to handle domain join, FSS mounts, and Samba config.
 # ------------------------------------------------------------------------------
-build {
-  sources = ["source.amazon-ebs.xubuntu_ami"]
 
-  # Install base packages and dependencies.
+build {
+  sources = ["source.oracle-oci.xubuntu"]
+
+  # Install base AD/NFS packages and OCI CLI.
   provisioner "shell" {
     script          = "./packages.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install Xubuntu desktop.
+  # Install OCI CLI into /opt/oci-venv.
+  provisioner "shell" {
+    script          = "./ocicli.sh"
+    execute_command = "sudo -E bash '{{.Path}}'"
+  }
+
+  # Install Xubuntu desktop (xfce4 + xubuntu-core).
   provisioner "shell" {
     script          = "./xubuntu.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install XRDP (RDP server).
+  # Install XRDP (RDP server for remote desktop access).
   provisioner "shell" {
     script          = "./xrdp.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
@@ -144,13 +129,13 @@ build {
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install HashiCorp tools.
+  # Install HashiCorp tools (Terraform, Packer, Consul).
   provisioner "shell" {
     script          = "./hashicorp.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install AWS CLI.
+  # Install AWS CLI v2.
   provisioner "shell" {
     script          = "./awscli.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
@@ -180,7 +165,7 @@ build {
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install KRDC (RDP client).
+  # Install KRDC (RDP client for connecting to other desktops).
   provisioner "shell" {
     script          = "./krdc.sh"
     execute_command = "sudo -E bash '{{.Path}}'"
@@ -192,7 +177,7 @@ build {
     execute_command = "sudo -E bash '{{.Path}}'"
   }
 
-  # Install desktop icons / shortcuts.
+  # Install desktop shortcuts and /etc/skel customizations.
   provisioner "shell" {
     script          = "./desktop.sh"
     execute_command = "sudo -E bash '{{.Path}}'"

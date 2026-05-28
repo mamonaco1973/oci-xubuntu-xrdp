@@ -1,102 +1,76 @@
 # ==============================================================================
-# Provider Configuration
+# Provider and Data Sources
 # ------------------------------------------------------------------------------
-# Defines the AWS provider and default region.
-# Modify region if deploying outside us-east-1.
+# Purpose:
+#   - Configures the OCI provider.
+#   - Reads outputs from 01-directory via terraform_remote_state.
+#   - Resolves the Windows Server 2022 image for the admin instance.
 # ==============================================================================
 
-provider "aws" {
-  region = "us-east-1"
-}
-
-
-# ==============================================================================
-# Data Source: AD Admin Secret
-# ------------------------------------------------------------------------------
-# Retrieves the AWS Secrets Manager secret containing AD admin credentials.
-# Used for domain join and authentication operations.
-# ==============================================================================
-
-data "aws_secretsmanager_secret" "admin_secret" {
-  name = "admin_ad_credentials_xubuntu"
-}
-
-
-# ==============================================================================
-# Data Source: VPC (Active Directory)
-# ------------------------------------------------------------------------------
-# Locates the VPC used for Active Directory infrastructure.
-# Filtered by Name tag provided via variable var.vpc_name.
-# ==============================================================================
-
-data "aws_vpc" "ad_vpc" {
-  filter {
-    name   = "tag:Name"
-    values = [var.vpc_name]
+terraform {
+  required_providers {
+    oci = {
+      source  = "oracle/oci"
+      version = "~> 6.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }
 
+# Unique 4-hex suffix so each deploy gets fresh computer account names —
+# prevents domain join conflicts if old accounts still exist in AD after destroy.
+resource "random_id" "server_suffix" {
+  byte_length = 2
+}
+
+provider "oci" {
+  region = "us-ashburn-1"
+}
 
 # ==============================================================================
-# Data Source: VM Subnet
-# ------------------------------------------------------------------------------
-# Retrieves subnet for EC2 desktop instances.
-# Filtered by:
-#   - VPC ID
-#   - Name tag = vm-subnet-1
+# Remote State: 01-directory
+# Reads compartment, VCN, subnet, admin credentials, and SSH key outputs.
 # ==============================================================================
 
-data "aws_subnet" "vm_subnet_1" {
-
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.ad_vpc.id]
-  }
-
-  filter {
-    name   = "tag:Name"
-    values = ["vm-subnet-1"]
+data "terraform_remote_state" "directory" {
+  backend = "local"
+  config = {
+    path = "../01-directory/terraform.tfstate"
   }
 }
 
-
-# ==============================================================================
-# Data Source: AD Subnet
-# ------------------------------------------------------------------------------
-# Retrieves subnet used for Active Directory services.
-# Filtered by:
-#   - VPC ID
-#   - Name tag = ad-subnet
-# ==============================================================================
-
-data "aws_subnet" "ad_subnet" {
-
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.ad_vpc.id]
-  }
-
-  filter {
-    name   = "tag:Name"
-    values = ["ad-subnet"]
-  }
+locals {
+  compartment_ocid             = data.terraform_remote_state.directory.outputs.compartment_ocid
+  vcn_id                       = data.terraform_remote_state.directory.outputs.vcn_id
+  vm_subnet_ocid               = data.terraform_remote_state.directory.outputs.vm_subnet_ocid
+  admin_password               = data.terraform_remote_state.directory.outputs.admin_password
+  ssh_public_key               = data.terraform_remote_state.directory.outputs.ssh_public_key
+  dc_private_ip                = data.terraform_remote_state.directory.outputs.dc_private_ip
+  windows_local_admin_password = data.terraform_remote_state.directory.outputs.windows_local_admin_password
+  xubuntu_hostname             = "xubuntu-${random_id.server_suffix.hex}"
+  windows_hostname             = "win-${random_id.server_suffix.hex}"
 }
 
-
 # ==============================================================================
-# Data Source: Windows Server 2022 AMI
-# ------------------------------------------------------------------------------
-# Retrieves the most recent Windows Server 2022 AMI from AWS.
-# Ensures latest official base image is used for deployments.
+# Availability Domain
 # ==============================================================================
 
-data "aws_ami" "windows_ami" {
+data "oci_identity_availability_domains" "ads" {
+  compartment_id = local.compartment_ocid
+}
 
-  most_recent = true
-  owners      = ["amazon"]
+# ==============================================================================
+# Windows Server 2022 Image
+# ==============================================================================
 
-  filter {
-    name   = "name"
-    values = ["Windows_Server-2022-English-Full-Base-*"]
-  }
+data "oci_core_images" "windows" {
+  compartment_id           = local.compartment_ocid
+  operating_system         = "Windows"
+  operating_system_version = "Server 2022 Standard"
+  shape                    = "VM.Standard.E4.Flex"
+  sort_by                  = "TIMECREATED"
+  sort_order               = "DESC"
 }
