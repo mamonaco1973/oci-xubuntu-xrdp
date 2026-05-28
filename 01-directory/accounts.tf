@@ -21,64 +21,72 @@ resource "local_file" "public_key" {
 }
 
 # ==============================================================================
-# AD Account Passwords
-# Passwords are generated here and passed to the DC via the module's user_data.
-# They are also output (sensitive) so 02-servers can read them via remote state.
+# Administrator Passwords
+# Strong random passwords for admin and local Windows account.
+# Stored as sensitive outputs in tfstate — retrieve with get_password.sh.
 # ==============================================================================
 
 resource "random_password" "admin_password" {
-  length           = 23
+  length           = 24
   special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
-}
-
-resource "random_password" "jsmith_password" {
-  length           = 23
-  special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
-}
-
-resource "random_password" "edavis_password" {
-  length           = 23
-  special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
-}
-
-resource "random_password" "rpatel_password" {
-  length           = 23
-  special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
-}
-
-resource "random_password" "akumar_password" {
-  length           = 23
-  special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
+  override_special = "_-."
 }
 
 resource "random_password" "windows_local_admin_password" {
-  length           = 23
+  length           = 24
   special          = true
-  min_numeric      = 2
-  min_special      = 2
-  override_special = "_-"
+  override_special = "_-."
+}
+
+# ==============================================================================
+# AD User Passwords
+# Memorable word + 6-digit number format — easy to type, meets AD complexity.
+# ==============================================================================
+
+locals {
+  memorable_words = [
+    "bright", "simple", "orange", "window", "little",
+    "people", "friend", "yellow", "animal", "family",
+    "circle", "moment", "summer", "button", "planet",
+    "rocket", "silver", "forest", "stream", "butter",
+    "castle", "wonder", "gentle", "driver", "coffee"
+  ]
+
+  ad_users = {
+    jsmith = "John Smith"
+    rpatel = "Raj Patel"
+    akumar = "Amit Kumar"
+    edavis = "Emily Davis"
+  }
+}
+
+resource "random_shuffle" "word" {
+  for_each     = local.ad_users
+  input        = local.memorable_words
+  result_count = 1
+}
+
+resource "random_integer" "num" {
+  for_each = local.ad_users
+  min      = 100000
+  max      = 999999
 }
 
 locals {
   admin_password               = "A${random_password.admin_password.result}"
   windows_local_admin_password = "A${random_password.windows_local_admin_password.result}"
-  jsmith_password              = "A${random_password.jsmith_password.result}"
-  edavis_password              = "A${random_password.edavis_password.result}"
-  rpatel_password              = "A${random_password.rpatel_password.result}"
-  akumar_password              = "A${random_password.akumar_password.result}"
+
+  passwords = {
+    for user in keys(local.ad_users) :
+    user => format(
+      "%s-%d",
+      random_shuffle.word[user].result[0],
+      random_integer.num[user].result
+    )
+  }
+
+  jsmith_password = local.passwords["jsmith"]
+  edavis_password = local.passwords["edavis"]
+  rpatel_password = local.passwords["rpatel"]
+  akumar_password = local.passwords["akumar"]
 }
