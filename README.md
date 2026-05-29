@@ -39,6 +39,8 @@ this solution automatically provisions:
    - Joins AD and maps `Z:` to `\\<xubuntu-private-ip>\nfs` at every login
    - RSAT pre-installed for AD administration
 
+![Architecture](oci-xubuntu.png)
+
 ---
 
 ## Prerequisites
