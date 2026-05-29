@@ -12,8 +12,13 @@ echo "user-data start: $(date -Is)"
 
 # Disable IPv6 — OCI subnets are IPv4-only; leaving IPv6 enabled causes glibc
 # to prefer AAAA records and waste time on unroutable connection attempts.
+# Written to sysctl.d so the disable persists across reboots.
 sysctl -w net.ipv6.conf.all.disable_ipv6=1
 sysctl -w net.ipv6.conf.default.disable_ipv6=1
+cat > /etc/sysctl.d/99-disable-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF
 
 # Disable automatic updates and kill any already-running apt processes —
 # OCI fires cloud-init fast enough that apt-daily may have grabbed the lock
@@ -150,6 +155,8 @@ if [ -f /etc/sssd/sssd.conf ]; then
   sed -i 's|fallback_homedir = /home/%u@%d|fallback_homedir = /home/%u|g' /etc/sssd/sssd.conf || true
   sed -i '/^\[nss\]/a entry_negative_timeout = 0' /etc/sssd/sssd.conf || true
   sed -i '/^\[domain\//a offline_timeout = 60' /etc/sssd/sssd.conf || true
+  # Allow all authenticated AD users — GPO access control blocks xrdp PAM service
+  sed -i '/^access_provider = ad/a ad_gpo_access_control = permissive' /etc/sssd/sssd.conf || true
   chmod 600 /etc/sssd/sssd.conf || true
 fi
 
@@ -281,7 +288,7 @@ echo "DEBUG: /nfs ownership:"
 ls -la /nfs || true
 
 cd /nfs
-git clone https://github.com/mamonaco1973/oci-fss.git
+git clone https://github.com/mamonaco1973/oci-xubuntu-xrdp.git
 chmod -R 775 oci-fss
 chgrp -R "${lower(netbios)}-users" oci-fss
 
