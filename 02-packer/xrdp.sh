@@ -84,3 +84,14 @@ auth required pam_env.so readenv=1 envfile=/etc/default/locale
 EOF
 
 echo "NOTE: Created /etc/pam.d/xrdp-sesman successfully."
+
+# ================================================================================
+# Step 5: Persist IPv6 disable so xrdp-sesman binds to 127.0.0.1 at boot
+# ================================================================================
+# Without this, xrdp-sesman binds to [::1]:3350 and xrdp cannot reach it
+# because OCI disables IPv6 routing — the two services can't communicate.
+cat > /etc/sysctl.d/99-disable-ipv6.conf <<'SYSCTL'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+SYSCTL
+echo "NOTE: IPv6 disable persisted to /etc/sysctl.d/99-disable-ipv6.conf."
